@@ -1,0 +1,27 @@
+# LangChain Core
+langchain
+langchain-core
+
+# Vector Store
+chromadb
+
+# Google Gemini (PaLM) Integration
+langchain-google-genai
+google-generativeai
+
+# Environment Variable Management
+python-dotenv
+
+# Community integrations (e.g., Chroma)
+langchain-community
+
+# YouTube Transcript API
+youtube-transcript-api
+
+# FastAPI Framework
+fastapi
+uvicorn
+pydantic
+
+deep-translator
+langdetect
