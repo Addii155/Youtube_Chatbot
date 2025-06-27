@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -10,12 +10,17 @@ from langchain_core.output_parsers import StrOutputParser
 from fastapi.middleware.cors import CORSMiddleware
 from deep_translator import GoogleTranslator
 from langdetect import detect
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import uuid
+import logging
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -27,13 +32,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Store video_id mapped to its vector store and refresh time
 video_collection_map = {}
 
-# Embedding & GenAI model
-embedding = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001"
-)
+embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
 genai_model = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
@@ -64,16 +65,13 @@ Answer:
 
 parser = StrOutputParser()
 
-
-
-
 def get_transcript(video_id: str):
     try:
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
         transcript_text = " ".join(item['text'] for item in transcript_list)
-        print(transcript_text)
-        # Detect and translate if needed
         detected_lang = detect(transcript_text)
+        logger.info(f"Transcript language detected: {detected_lang}")
+
         if detected_lang != "en":
             translated = GoogleTranslator(source='auto', target='en').translate(transcript_text)
             return [translated]
@@ -81,49 +79,21 @@ def get_transcript(video_id: str):
 
     except TranscriptsDisabled:
         raise HTTPException(status_code=404, detail="Transcripts are disabled for this video.")
+    except NoTranscriptFound:
+        raise HTTPException(status_code=404, detail="No transcript found.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+        raise HTTPException(status_code=500, detail=f"Transcript error: {str(e)}")
 
 def get_splitter(transcript: list):
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.create_documents(transcript)
-    return chunks
-
-
-def refresh_embedding_if_needed(video_id: str):
-    now = datetime.utcnow()
-    data = video_collection_map.get(video_id)
-
-    if not data:
-        raise HTTPException(status_code=400, detail="Video not submitted.")
-
-    last_updated = data["last_updated"]
-    if now - last_updated >= timedelta(hours=1):
-        # Rebuild vector store
-        transcript = get_transcript(video_id)
-        chunks = get_splitter(transcript)
-        Chroma.from_documents(
-            documents=chunks,
-            embedding=embedding,
-            collection_name=data["collection_name"],
-            persist_directory="chroma_db"
-        )
-        video_collection_map[video_id]["last_updated"] = now
-
-
-# ========= API Schemas ========= #
+    return splitter.create_documents(transcript)
 
 class SubmitRequest(BaseModel):
     video_id: str
 
-
 class AskRequest(BaseModel):
     video_id: str
     question: str
-
-
-# ========= Routes ========= #
 
 @app.post("/submit")
 async def submit_video(req: SubmitRequest):
@@ -131,7 +101,7 @@ async def submit_video(req: SubmitRequest):
         transcript = get_transcript(req.video_id)
         chunks = get_splitter(transcript)
 
-        collection_name = f"vid_{uuid.uuid4().hex}"
+        collection_name = f"vid_{req.video_id}"
         Chroma.from_documents(
             documents=chunks,
             embedding=embedding,
@@ -141,13 +111,12 @@ async def submit_video(req: SubmitRequest):
 
         video_collection_map[req.video_id] = {
             "collection_name": collection_name,
-            "last_updated": datetime.utcnow()
         }
 
         return {"message": "Transcript processed and stored successfully."}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/ask")
 async def ask_question(req: AskRequest):
@@ -155,11 +124,9 @@ async def ask_question(req: AskRequest):
         if req.video_id not in video_collection_map:
             raise HTTPException(status_code=400, detail="Video not submitted. Please submit first.")
 
-        refresh_embedding_if_needed(req.video_id)
-
         collection_name = video_collection_map[req.video_id]['collection_name']
-
         detected_lang = detect(req.question)
+
         translated_question = (
             GoogleTranslator(source='auto', target='en').translate(req.question)
             if detected_lang != "en"
@@ -186,5 +153,14 @@ async def ask_question(req: AskRequest):
 
         return {"answer": final_answer}
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/getcomment')
+async def get_comments_endpoint(req: SubmitRequest):
+    try:
+        from app.api import get_comments
+        comments = get_comments(req.video_id)
+        return {"comments": comments}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
